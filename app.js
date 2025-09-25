@@ -11,20 +11,47 @@ with this program. If not, see <https://www.gnu.org/licenses/>.
 
 function updateSetupSliders()
 {
-  let simResX = parseInt(simResSelX.value);
-  let simResY = parseInt(simResSelY.value);
-  let simHeight = parseInt(simHeightSel.value);
+  const simResSelXEl = document.getElementById('simResSelX');
+  const simResSelYEl = document.getElementById('simResSelY');
+  const simHeightSelEl = document.getElementById('simHeightSel');
 
-  let cellHeight = simHeight / simResY;
-  let simWidth = cellHeight * simResX;
+  if (!simResSelXEl || !simResSelYEl || !simHeightSelEl)
+    return;
 
-  document.getElementById('simWorldProperties').innerHTML = 'cellHeight: ' + cellHeight.toFixed(1) + ' m  &nbsp&nbsp&nbsp   Simulation width: ' + (simWidth / 1000).toFixed(1) + ' km';
+  const simResX = parseInt(simResSelXEl.value, 10);
+  const simResY = parseInt(simResSelYEl.value, 10);
+  const simHeight = parseInt(simHeightSelEl.value, 10);
 
-  document.getElementById("simHeightWarning").style.display = (simHeight == 12000) ? 'none' : 'block';
-  document.getElementById("simResYWarning").style.display = (simResY == 300) ? 'none' : 'block';
-  document.getElementById("simResShowX").value = simResX;
-  document.getElementById("simResShowY").value = simResY
-  document.getElementById("simHeightShow").value = simHeight + ' m';
+  if (isNaN(simResX) || isNaN(simResY) || isNaN(simHeight) || simResY === 0)
+    return;
+
+  const cellHeight = simHeight / simResY;
+  const simWidth = cellHeight * simResX;
+
+  const simWorldPropertiesEl = document.getElementById('simWorldProperties');
+  if (simWorldPropertiesEl) {
+    simWorldPropertiesEl.textContent = `cellHeight: ${cellHeight.toFixed(1)} m \u00A0\u00A0\u00A0 Simulation width: ${(simWidth / 1000).toFixed(1)} km`;
+  }
+
+  const simHeightWarningEl = document.getElementById("simHeightWarning");
+  if (simHeightWarningEl)
+    simHeightWarningEl.style.display = (simHeight == 12000) ? 'none' : 'block';
+
+  const simResYWarningEl = document.getElementById("simResYWarning");
+  if (simResYWarningEl)
+    simResYWarningEl.style.display = (simResY == 300) ? 'none' : 'block';
+
+  const simResShowXEl = document.getElementById("simResShowX");
+  if (simResShowXEl)
+    simResShowXEl.value = simResX;
+
+  const simResShowYEl = document.getElementById("simResShowY");
+  if (simResShowYEl)
+    simResShowYEl.value = simResY;
+
+  const simHeightShowEl = document.getElementById("simHeightShow");
+  if (simHeightShowEl)
+    simHeightShowEl.value = simHeight + ' m';
 }
 
 var FPS = 60.0;
