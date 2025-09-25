@@ -107,6 +107,12 @@ const guiControls_default = {
   SmoothCam : true,
   camSpeed : 0.01,
   exposure : 1.0,
+  mapProjection : 'equirectangular',
+  mapRegion : 'global',
+  regionCenterLongitude : 0.0,
+  regionCenterLatitude : 0.0,
+  regionLongitudeSpan : 360.0,
+  regionLatitudeSpan : 180.0,
   timeOfDay : 9.9,
   latitude : 45.0,
   month : 6.65, // Northern hemisphere summer solstice
@@ -155,6 +161,8 @@ var saveFileName = '';
 
 var guiControlsFromSaveFile = null;
 var datGui;
+
+var mapOverlayEl = null;
 
 var sim_res_x;
 var sim_res_y;
@@ -2587,6 +2595,11 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
   canvas = document.getElementById('mainCanvas');
 
+  mapOverlayEl = document.getElementById('mapOverlay');
+  if (mapOverlayEl) {
+    mapOverlayEl.style.display = 'block';
+  }
+
   var contextAttributes = {
     alpha : false,
     desynchronized : false,
@@ -2657,6 +2670,195 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
     gl.uniform1f(gl.getUniformLocation(postProcessingProgram, 'exposure'), guiControls.exposure);
   }
 
+  const PROJECTION_CONFIGS = {
+    equirectangular : { baseScaleX : 1.0, baseScaleY : 1.0, opacity : 0.55 },
+    mercator : { baseScaleX : 1.0, baseScaleY : 1.3, opacity : 0.6 },
+    orthographic : { baseScaleX : 1.2, baseScaleY : 1.2, opacity : 0.68 },
+  };
+
+  const REGION_PRESETS = {
+    global : { wrap : true, horizontalMultiplier : 3.0, centerLon : 0.0, centerLat : 0.0, spanLon : 360.0, spanLat : 180.0 },
+    northernHemisphere : { wrap : false, horizontalMultiplier : 1.0, centerLon : 0.0, centerLat : 45.0, spanLon : 360.0, spanLat : 120.0 },
+    northAmerica : { wrap : false, horizontalMultiplier : 1.0, centerLon : -100.0, centerLat : 40.0, spanLon : 140.0, spanLat : 100.0 },
+    europe : { wrap : false, horizontalMultiplier : 1.0, centerLon : 15.0, centerLat : 50.0, spanLon : 120.0, spanLat : 80.0 },
+    asiaPacific : { wrap : false, horizontalMultiplier : 1.0, centerLon : 135.0, centerLat : 15.0, spanLon : 160.0, spanLat : 120.0 },
+    southAsia : { wrap : false, horizontalMultiplier : 1.0, centerLon : 80.0, centerLat : 20.0, spanLon : 120.0, spanLat : 90.0 },
+    custom : { wrap : false, horizontalMultiplier : 1.0 },
+  };
+
+  let wrapController;
+  let mapProjectionController;
+  let mapRegionController;
+  const customRegionControllers = [];
+
+  function ensureGeographyDefaults(target)
+  {
+    if (target.mapProjection == null)
+      target.mapProjection = 'equirectangular';
+    if (target.mapRegion == null)
+      target.mapRegion = 'global';
+
+    target.regionCenterLongitude = Number(target.regionCenterLongitude ?? 0.0);
+    if (Number.isNaN(target.regionCenterLongitude))
+      target.regionCenterLongitude = 0.0;
+
+    target.regionCenterLatitude = Number(target.regionCenterLatitude ?? 0.0);
+    if (Number.isNaN(target.regionCenterLatitude))
+      target.regionCenterLatitude = 0.0;
+
+    target.regionLongitudeSpan = Number(target.regionLongitudeSpan ?? 360.0);
+    if (Number.isNaN(target.regionLongitudeSpan) || target.regionLongitudeSpan <= 0.0)
+      target.regionLongitudeSpan = 360.0;
+    target.regionLongitudeSpan = clamp(target.regionLongitudeSpan, 10.0, 360.0);
+
+    target.regionLatitudeSpan = Number(target.regionLatitudeSpan ?? 180.0);
+    if (Number.isNaN(target.regionLatitudeSpan) || target.regionLatitudeSpan <= 0.0)
+      target.regionLatitudeSpan = 180.0;
+    target.regionLatitudeSpan = clamp(target.regionLatitudeSpan, 10.0, 180.0);
+  }
+
+  function applyHorizontalDisplaySettings(wrap, multiplier)
+  {
+    guiControls.wrapHorizontally = wrap;
+    cam.wrapHorizontally = wrap;
+    horizontalDisplayMult = multiplier;
+  }
+
+  function normalizeLongitude(lon)
+  {
+    let normalized = lon % 360.0;
+    if (normalized < -180.0)
+      normalized += 360.0;
+    if (normalized > 180.0)
+      normalized -= 360.0;
+    return normalized;
+  }
+
+  function updateProjectionClasses(projectionKey)
+  {
+    if (!mapOverlayEl)
+      return;
+
+    mapOverlayEl.classList.remove('projection-mercator', 'projection-orthographic');
+
+    if (projectionKey === 'mercator')
+      mapOverlayEl.classList.add('projection-mercator');
+    else if (projectionKey === 'orthographic')
+      mapOverlayEl.classList.add('projection-orthographic');
+  }
+
+  function updateMapOverlayStyles(centerLon, spanLon, centerLat, spanLat, projectionKey)
+  {
+    if (!mapOverlayEl)
+      return;
+
+    updateProjectionClasses(projectionKey);
+
+    const projection = PROJECTION_CONFIGS[projectionKey] || PROJECTION_CONFIGS.equirectangular;
+
+    const lonSpan = clamp(Math.abs(spanLon) || 1.0, 10.0, 360.0);
+    const latSpan = clamp(Math.abs(spanLat) || 1.0, 10.0, 180.0);
+
+    const scaleX = projection.baseScaleX * (360.0 / lonSpan) * 100.0;
+    const scaleY = projection.baseScaleY * (180.0 / latSpan) * 100.0;
+
+    const lonNorm = ((normalizeLongitude(centerLon) + 180.0) % 360.0) / 360.0;
+    const latClamped = clamp(centerLat, -90.0, 90.0);
+    const latNorm = (90.0 - latClamped) / 180.0;
+
+    mapOverlayEl.style.backgroundSize = `${scaleX}% ${scaleY}%`;
+    mapOverlayEl.style.backgroundPosition = `${lonNorm * 100.0}% ${latNorm * 100.0}%`;
+    mapOverlayEl.style.opacity = projection.opacity;
+    mapOverlayEl.style.display = 'block';
+  }
+
+  function computeCameraSettings(centerLon, spanLon, centerLat, spanLat)
+  {
+    const aspect = sim_aspect || (sim_res_x / sim_res_y) || 1.0;
+
+    const lonNorm = ((normalizeLongitude(centerLon) + 180.0) % 360.0) / 360.0;
+    const latClamped = clamp(centerLat, -90.0, 90.0);
+    const latNorm = (90.0 - latClamped) / 180.0;
+
+    const xPos = clamp((0.5 - lonNorm) * 2.0, -0.99, 0.99);
+    const yPos = clamp((0.5 - latNorm) * 2.0 / aspect, -2.5, 0.5);
+
+    const lonSpan = clamp(Math.abs(spanLon) || 1.0, 10.0, 360.0);
+    const latSpan = clamp(Math.abs(spanLat) || 1.0, 10.0, 180.0);
+
+    const zoomX = 360.0 / lonSpan;
+    const zoomY = 180.0 / latSpan;
+    const maxZoom = 35.0 * aspect;
+    const zoom = clamp(Math.max(zoomX, zoomY), 1.0, maxZoom);
+
+    return { x : xPos, y : yPos, zoom : zoom };
+  }
+
+  function getActiveRegionConfig()
+  {
+    const key = guiControls.mapRegion;
+    if (key === 'custom') {
+      return {
+        wrap : false,
+        horizontalMultiplier : 1.0,
+        centerLon : guiControls.regionCenterLongitude,
+        centerLat : guiControls.regionCenterLatitude,
+        spanLon : guiControls.regionLongitudeSpan,
+        spanLat : guiControls.regionLatitudeSpan,
+      };
+    }
+
+    const preset = REGION_PRESETS[key] || REGION_PRESETS.global;
+    return {
+      wrap : preset.wrap,
+      horizontalMultiplier : preset.horizontalMultiplier,
+      centerLon : preset.centerLon,
+      centerLat : preset.centerLat,
+      spanLon : preset.spanLon,
+      spanLat : preset.spanLat,
+    };
+  }
+
+  function updateOverlayOnly()
+  {
+    if (!guiControls)
+      return;
+    const config = getActiveRegionConfig();
+    updateMapOverlayStyles(config.centerLon, config.spanLon, config.centerLat, config.spanLat, guiControls.mapProjection);
+  }
+
+  function applyRegionSelection(options)
+  {
+    if (!guiControls)
+      return;
+
+    const config = getActiveRegionConfig();
+    const wrap = config.wrap ?? false;
+    const multiplier = config.horizontalMultiplier ?? (wrap ? 3.0 : 1.0);
+
+    applyHorizontalDisplaySettings(wrap, multiplier);
+
+    if (wrapController)
+      wrapController.updateDisplay();
+
+    if (!options || options.updateCamera !== false) {
+      const camera = computeCameraSettings(config.centerLon, config.spanLon, config.centerLat, config.spanLat);
+      cam.setPosition(camera.x, camera.y, camera.zoom);
+    }
+
+    if (!options || options.updateOverlay !== false)
+      updateMapOverlayStyles(config.centerLon, config.spanLon, config.centerLat, config.spanLat, guiControls.mapProjection);
+  }
+
+  function updateCustomRegionVisibility()
+  {
+    const isCustom = guiControls.mapRegion === 'custom';
+    customRegionControllers.forEach(controller => {
+      if (controller && controller.domElement && controller.domElement.parentElement)
+        controller.domElement.parentElement.style.display = isCustom ? '' : 'none';
+    });
+  }
+
   function setupDatGui(strGuiControls)
   {
     datGui = new dat.GUI();
@@ -2664,13 +2866,12 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
     guiControls.tool = "TOOL_NONE";
 
-    cam.wrapHorizontally = guiControls.wrapHorizontally;
-    cam.smooth = guiControls.SmoothCam;
+    ensureGeographyDefaults(guiControls);
 
-    if (guiControls.wrapHorizontally)
-      horizontalDisplayMult = 3.0;
-    else
-      horizontalDisplayMult = 1.0;
+    customRegionControllers.length = 0;
+
+    applyHorizontalDisplaySettings(guiControls.wrapHorizontally, guiControls.wrapHorizontally ? 3.0 : 1.0);
+    cam.smooth = guiControls.SmoothCam;
 
 
     if (frameNum == 0) {
@@ -2960,14 +3161,11 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
     display_folder.add(guiControls, 'camSpeed', 0.001, 0.050, 0.001).name('Camera Pan Speed');
 
 
-    display_folder.add(guiControls, 'wrapHorizontally')
-      .onChange(function() {
-        cam.wrapHorizontally = guiControls.wrapHorizontally;
+    wrapController = display_folder.add(guiControls, 'wrapHorizontally')
+      .onChange(function(value) {
+        applyHorizontalDisplaySettings(value, value ? 3.0 : 1.0);
         cam.center();
-        if (guiControls.wrapHorizontally)
-          horizontalDisplayMult = 3.0;
-        else
-          horizontalDisplayMult = 1.0;
+        updateOverlayOnly();
       })
       .name("Wrap Horizontally");
 
@@ -3000,6 +3198,88 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
         'kt' : 'SPEED_UNIT_KT',
       })
       .name('Speed Unit');
+
+    var geography_folder = datGui.addFolder('Geography');
+
+    mapProjectionController = geography_folder
+      .add(guiControls, 'mapProjection', {
+        'Equirectangular' : 'equirectangular',
+        'Mercator' : 'mercator',
+        'Orthographic' : 'orthographic',
+      })
+      .name('Map Projection')
+      .onChange(function(value) {
+        guiControls.mapProjection = value;
+        updateOverlayOnly();
+      });
+
+    mapRegionController = geography_folder
+      .add(guiControls, 'mapRegion', {
+        'Global Coverage' : 'global',
+        'Northern Hemisphere' : 'northernHemisphere',
+        'North America' : 'northAmerica',
+        'Europe' : 'europe',
+        'Asia-Pacific' : 'asiaPacific',
+        'South Asia' : 'southAsia',
+        'Custom View' : 'custom',
+      })
+      .name('Region')
+      .onChange(function(value) {
+        guiControls.mapRegion = value;
+        updateCustomRegionVisibility();
+        applyRegionSelection();
+      });
+
+    const regionCenterLongitudeController = geography_folder
+      .add(guiControls, 'regionCenterLongitude', -180.0, 180.0, 1.0)
+      .name('Center Longitude')
+      .onChange(function(value) {
+        guiControls.regionCenterLongitude = clamp(value, -180.0, 180.0);
+        if (guiControls.mapRegion === 'custom')
+          applyRegionSelection();
+        else
+          updateOverlayOnly();
+      });
+    customRegionControllers.push(regionCenterLongitudeController);
+
+    const regionCenterLatitudeController = geography_folder
+      .add(guiControls, 'regionCenterLatitude', -90.0, 90.0, 1.0)
+      .name('Center Latitude')
+      .onChange(function(value) {
+        guiControls.regionCenterLatitude = clamp(value, -90.0, 90.0);
+        if (guiControls.mapRegion === 'custom')
+          applyRegionSelection();
+        else
+          updateOverlayOnly();
+      });
+    customRegionControllers.push(regionCenterLatitudeController);
+
+    const regionLongitudeSpanController = geography_folder
+      .add(guiControls, 'regionLongitudeSpan', 10.0, 360.0, 1.0)
+      .name('Longitude Span')
+      .onChange(function(value) {
+        guiControls.regionLongitudeSpan = clamp(value, 10.0, 360.0);
+        if (guiControls.mapRegion === 'custom')
+          applyRegionSelection();
+        else
+          updateOverlayOnly();
+      });
+    customRegionControllers.push(regionLongitudeSpanController);
+
+    const regionLatitudeSpanController = geography_folder
+      .add(guiControls, 'regionLatitudeSpan', 10.0, 180.0, 1.0)
+      .name('Latitude Span')
+      .onChange(function(value) {
+        guiControls.regionLatitudeSpan = clamp(value, 10.0, 180.0);
+        if (guiControls.mapRegion === 'custom')
+          applyRegionSelection();
+        else
+          updateOverlayOnly();
+      });
+    customRegionControllers.push(regionLatitudeSpanController);
+
+    updateCustomRegionVisibility();
+    updateOverlayOnly();
 
     display_folder
       .add(guiControls, 'tempUnit', {
@@ -3347,6 +3627,8 @@ async function mainScript(initialBaseTex, initialWaterTex, initialWallTex, initi
 
 
   sim_aspect = sim_res_x / sim_res_y;
+
+  applyRegionSelection();
 
   var canvas_aspect;
 
